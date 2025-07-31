@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+from io import BytesIO
 
 # Normalize string columns: lowercase, strip spaces
 def normalize_col(col):
@@ -32,7 +33,7 @@ def process_files(forms_df, ups_df):
 
         if acc_norm not in ups_grouped.groups:
             # No UPS data for this account, unmatched
-            unmatched_rows.append(form_row)
+            unmatched_rows.append(form_row.to_dict())
             continue
 
         ups_acc_df = ups_grouped.get_group(acc_norm)
@@ -52,13 +53,15 @@ def process_files(forms_df, ups_df):
 
             # Check if this address matches any UPS address lines (Line1+Line2)
             matched_in_ups = False
+            ups_row_for_template = None
             for _, ups_row in ups_acc_df.iterrows():
                 if address_match(new_addr1, new_addr2, ups_row["Address Line 1"], ups_row["Address Line 2"]):
                     matched_in_ups = True
+                    ups_row_for_template = ups_row
                     break
 
             if matched_in_ups:
-                matched_rows.append(form_row)
+                matched_rows.append(form_row.to_dict())
                 processed_form_indices.add(idx)
 
                 # Upload template requires 3 rows with codes 1, 2, 6
@@ -67,18 +70,18 @@ def process_files(forms_df, ups_df):
                         "AC_NUM": form_row["Account Number"],
                         "AC_Address_Type": code,
                         "invoice option": "",  # fill if needed
-                        "AC_Name": ups_row["AC_Name"],
+                        "AC_Name": ups_row_for_template["AC_Name"],
                         "Address_Line1": new_addr1,
                         "Address_Line2": new_addr2,
                         "City": city,
-                        "Postal_Code": ups_row["Postal_Code"],
-                        "Country_Code": ups_row["Country_Code"],
+                        "Postal_Code": ups_row_for_template["Postal_Code"],
+                        "Country_Code": ups_row_for_template["Country_Code"],
                         "Attention_Name": contact,
                         "Address_Line22": new_addr3,
-                        "Address_Country_Code": ups_row["Address_Country_Code"]
+                        "Address_Country_Code": ups_row_for_template["Address_Country_Code"]
                     })
             else:
-                unmatched_rows.append(form_row)
+                unmatched_rows.append(form_row.to_dict())
 
         else:
             # When "No" for billing same as pickup/delivery,
@@ -130,21 +133,21 @@ def process_files(forms_df, ups_df):
             pickup_matches = []
             if len(pickup_addrs) != ups_pickup_count:
                 # Number of pickup addresses mismatch => unmatched
-                unmatched_rows.append(form_row)
+                unmatched_rows.append(form_row.to_dict())
                 continue
             else:
                 # Check each pickup address
                 for pu_addr in pickup_addrs:
                     match = check_address_in_ups(pu_addr[0], pu_addr[1], "02")
                     if match is None:
-                        unmatched_rows.append(form_row)
+                        unmatched_rows.append(form_row.to_dict())
                         break
                     else:
                         pickup_matches.append(match)
                 else:
                     # All pickups matched
                     processed_form_indices.add(idx)
-                    matched_rows.append(form_row)
+                    matched_rows.append(form_row.to_dict())
 
                     # Add pickup addresses to upload template
                     for pu_addr in pickup_addrs:
@@ -224,24 +227,30 @@ def main():
 
             st.success(f"✅ Completed: {len(matched_df)} matched, {len(unmatched_df)} unmatched.")
 
+            def to_excel_bytes(df):
+                output = BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    df.to_excel(writer, index=False)
+                return output.getvalue()
+
             if not matched_df.empty:
                 st.download_button(
                     label="Download Matched Records",
-                    data=matched_df.to_excel(index=False, engine='openpyxl'),
+                    data=to_excel_bytes(matched_df),
                     file_name="matched_records.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             if not unmatched_df.empty:
                 st.download_button(
                     label="Download Unmatched Records",
-                    data=unmatched_df.to_excel(index=False, engine='openpyxl'),
+                    data=to_excel_bytes(unmatched_df),
                     file_name="unmatched_records.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             if not upload_template_df.empty:
                 st.download_button(
                     label="Download Upload Template",
-                    data=upload_template_df.to_excel(index=False, engine='openpyxl'),
+                    data=to_excel_bytes(upload_template_df),
                     file_name="upload_template.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
