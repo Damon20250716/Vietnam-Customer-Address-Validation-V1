@@ -1,179 +1,184 @@
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="Vietnam Address Validation Tool", layout="wide")
+# ------------------ Utility Functions ------------------
 
-st.title("🇻🇳 Vietnam Address Validation Tool")
-st.write("Validate customer-submitted addresses from Microsoft Forms against UPS system records.")
+def normalize_col(col):
+    return col.astype(str).str.lower().str.strip()
 
-def normalize_col(s):
-    return s.astype(str).str.strip().str.lower().str.replace(" ", "")
+def load_excel_file(uploaded_file):
+    df = pd.read_excel(uploaded_file)
+    df.columns = df.columns.str.strip().str.replace('\n', ' ').str.replace('\r', '', regex=False)
+    return df
 
-def prepare_upload_template(df):
-    # Expand billing addresses (code '03') into three codes: 1,2,6
-    billing = df[df["Address Type"] == "03"].copy()
-    others = df[df["Address Type"] != "03"].copy()
+# ------------------ Matching Logic ------------------
 
-    billing_expanded = billing.loc[billing.index.repeat(3)].copy()
-    billing_expanded["Code"] = [1, 2, 6] * len(billing)
+def is_address_equal(addr1, addr2):
+    return normalize_col(addr1) == normalize_col(addr2)
 
-    # For other address types, just map Address Type to Code directly
-    others["Code"] = others["Address Type"].astype(str)
+def process_forms_and_ups(forms_df, ups_df):
+    matched = []
+    unmatched = []
+    upload_template = []
 
-    # Concatenate billing expanded and others
-    upload_df = pd.concat([billing_expanded, others], ignore_index=True)
+    for _, form_row in forms_df.iterrows():
+        acc = str(form_row.get("Account Number", "")).strip()
+        is_same = str(form_row.get("Is Your New Billing Address the Same as Your Pickup and Delivery Address?", "")).strip().lower()
 
-    # Rename columns for upload format
-    upload_df = upload_df.rename(columns={
-        "Account Number": "Account Number",
-        "New Address Line 1": "Line 1",
-        "New Address Line 2": "Line 2",
-        "New Address Line 3": "Line 3",
-        "Code": "Code"
-    })[["Account Number", "Code", "Line 1", "Line 2", "Line 3"]]
+        addr1 = form_row.get("New Address Line 1 (Address No., Industrial Park Name, etc)-In English Only", "")
+        addr2 = form_row.get("New Address Line 2 (Street Name)-In English Only", "")
+        addr3 = form_row.get("New Address Line 3 (Ward/Commune)-In English Only", "")
+        city = form_row.get("City / Province", "")
+        email = form_row.get("Please Provide Your Email Address-In English Only", "")
+        contact = form_row.get("Full Name of Contact-In English Only", "")
+        phone = form_row.get("Contact Phone Number", "")
 
-    return upload_df
+        if is_same == "yes":
+            # Treat as address type 01 (all)
+            matched.append({
+                "Account Number": acc,
+                "Address Type": "01",
+                "Address Line 1": addr1,
+                "Address Line 2": addr2,
+                "Address Line 3": addr3,
+                "City": city,
+                "Email": email,
+                "Contact Name": contact,
+                "Phone": phone
+            })
+            # Upload template needs 3 rows with address types 1, 2, 6
+            for code in ["1", "2", "6"]:
+                upload_template.append({
+                    "Account Number": acc,
+                    "Address Type": code,
+                    "Address Line 1": addr1,
+                    "Address Line 2": addr2,
+                    "Address Line 3": addr3,
+                    "City": city,
+                    "Email": email,
+                    "Contact Name": contact,
+                    "Phone": phone
+                })
+        else:
+            # Lookup pickup address count in UPS file
+            ups_matches = ups_df[normalize_col(ups_df["Account Number"]) == acc]
+            pickup_count = (ups_matches["Address Type"] == "02").sum()
+
+            if pickup_count == 1:
+                matched.extend([
+                    {
+                        "Account Number": acc,
+                        "Address Type": "02",
+                        "Address Line 1": form_row.get("New Pick Up Address Line 1 (Address No., Industrial Park Name, etc)-In Vietnamese without accents", ""),
+                        "Address Line 2": form_row.get("New Pick Up Address Line 2 (Street Name)-In Vietnamese without tone marks", ""),
+                        "Address Line 3": form_row.get("New Pick Up Address Line 3 (Ward/Commune)-In Vietnamese without tone marks", ""),
+                        "City": form_row.get("City / Province", ""),
+                        "Email": email,
+                        "Contact Name": contact,
+                        "Phone": phone
+                    },
+                    {
+                        "Account Number": acc,
+                        "Address Type": "03",
+                        "Address Line 1": form_row.get("New Billing Address Line 1 (Address No., Industrial Park Name, etc)-In English Only", ""),
+                        "Address Line 2": form_row.get("New Billing Address Line 2 (Street Name)-In English Only", ""),
+                        "Address Line 3": form_row.get("New Billing Address Line 3 (Ward/Commune)-In English Only", ""),
+                        "City": form_row.get("City / Province", ""),
+                        "Email": email,
+                        "Contact Name": contact,
+                        "Phone": phone
+                    },
+                    {
+                        "Account Number": acc,
+                        "Address Type": "13",
+                        "Address Line 1": form_row.get("New Delivery Address Line 1 (Address No., Industrial Park Name, etc)-In English Only", ""),
+                        "Address Line 2": form_row.get("New Delivery Address Line 2 (Street Name)-In English Only", ""),
+                        "Address Line 3": form_row.get("New Delivery Address Line 3 (Ward/Commune)-In English Only", ""),
+                        "City": form_row.get("City / Province", ""),
+                        "Email": email,
+                        "Contact Name": contact,
+                        "Phone": phone
+                    }
+                ])
+            else:
+                # Multiple pickup addresses: create rows per pickup
+                for i in range(1, pickup_count + 1):
+                    matched.append({
+                        "Account Number": acc,
+                        "Address Type": "02",
+                        "Address Line 1": form_row.get(f"{i}st New Pick Up Address Line 1", ""),
+                        "Address Line 2": form_row.get(f"{i}st New Pick Up Address Line 2", ""),
+                        "Address Line 3": form_row.get(f"{i}st New Pick Up Address Line 3", ""),
+                        "City": city,
+                        "Email": email,
+                        "Contact Name": contact,
+                        "Phone": phone
+                    })
+                # Add billing & delivery
+                matched.extend([
+                    {
+                        "Account Number": acc,
+                        "Address Type": "03",
+                        "Address Line 1": form_row.get("New Billing Address Line 1 (Address No., Industrial Park Name, etc)-In English Only", ""),
+                        "Address Line 2": form_row.get("New Billing Address Line 2 (Street Name)-In English Only", ""),
+                        "Address Line 3": form_row.get("New Billing Address Line 3 (Ward/Commune)-In English Only", ""),
+                        "City": city,
+                        "Email": email,
+                        "Contact Name": contact,
+                        "Phone": phone
+                    },
+                    {
+                        "Account Number": acc,
+                        "Address Type": "13",
+                        "Address Line 1": form_row.get("New Delivery Address Line 1 (Address No., Industrial Park Name, etc)-In English Only", ""),
+                        "Address Line 2": form_row.get("New Delivery Address Line 2 (Street Name)-In English Only", ""),
+                        "Address Line 3": form_row.get("New Delivery Address Line 3 (Ward/Commune)-In English Only", ""),
+                        "City": city,
+                        "Email": email,
+                        "Contact Name": contact,
+                        "Phone": phone
+                    }
+                ])
+
+    # Forms accounts that never matched
+    matched_accs = {row["Account Number"] for row in matched}
+    for _, row in forms_df.iterrows():
+        if str(row.get("Account Number", "")).strip() not in matched_accs:
+            unmatched.append(row)
+
+    return matched, unmatched, upload_template
+
+# ------------------ Streamlit UI ------------------
 
 def main():
+    st.title("🇻🇳 Vietnam Address Validation Tool")
+
     forms_file = st.file_uploader("Upload Microsoft Forms Response File", type=["xlsx"])
     ups_file = st.file_uploader("Upload UPS System Address File", type=["xlsx"])
 
     if forms_file and ups_file:
-        forms_df = pd.read_excel(forms_file)
-        ups_df = pd.read_excel(ups_file)
+        try:
+            with st.spinner("Processing..."):
+                forms_df = load_excel_file(forms_file)
+                ups_df = load_excel_file(ups_file)
 
-        # Normalize account numbers and address lines for comparison
-        forms_df["Account Number"] = forms_df["Account Number"].astype(str).str.strip().str.lower()
-        ups_df["Account Number"] = ups_df["Account Number"].astype(str).str.strip().str.lower()
+                st.subheader("🔍 Debug Info")
+                st.write("Forms Columns:", forms_df.columns.tolist())
+                st.write("UPS Columns:", ups_df.columns.tolist())
 
-        ups_df["Address Line 1_norm"] = normalize_col(ups_df["Address Line 1"])
-        ups_df["Address Line 2_norm"] = normalize_col(ups_df["Address Line 2"])
+                matched, unmatched, template = process_forms_and_ups(forms_df, ups_df)
 
-        matched_rows = []
-        unmatched_rows = []
+                matched_df = pd.DataFrame(matched)
+                unmatched_df = pd.DataFrame(unmatched)
+                upload_df = pd.DataFrame(template)
 
-        # Create dict of UPS addresses grouped by account and address type for quick lookup
-        ups_grouped = ups_df.groupby("Account Number")
+                st.success("✅ Processing Complete!")
+                st.download_button("📥 Download Matched File", matched_df.to_excel(index=False), "matched.xlsx")
+                st.download_button("📥 Download Unmatched File", unmatched_df.to_excel(index=False), "unmatched.xlsx")
+                st.download_button("📥 Download Upload Template", upload_df.to_excel(index=False), "upload_template.xlsx")
 
-        for idx, form_row in forms_df.iterrows():
-            acc = form_row["Account Number"]
-            if acc not in ups_grouped.groups:
-                unmatched_rows.append(form_row)
-                continue
-
-            ups_account_df = ups_grouped.get_group(acc)
-
-            # Check if billing same as pickup and delivery
-            same_billing = str(form_row.get("Is Your New Billing Address the Same as Your Pickup and Delivery Address?", "")).strip().lower() == "yes"
-
-            if same_billing:
-                # Unified address, address type 01
-                new_addr1 = form_row["New Address Line 1 (Address No., Industrial Park Name, etc)-In English Only"]
-                new_addr2 = form_row["New Address Line 2 (Street Name)-In English Only"]
-                new_addr1_norm = str(new_addr1).strip().lower().replace(" ", "")
-                new_addr2_norm = str(new_addr2).strip().lower().replace(" ", "")
-
-                # Check if any UPS address line1 & line2 matches
-                found = False
-                for _, ups_addr in ups_account_df.iterrows():
-                    if (ups_addr["Address Line 1_norm"] == new_addr1_norm and
-                        ups_addr["Address Line 2_norm"] == new_addr2_norm):
-                        matched_rows.append({
-                            "Account Number": acc,
-                            "Address Type": "01",
-                            "New Address Line 1": new_addr1,
-                            "New Address Line 2": new_addr2,
-                            "New Address Line 3": form_row["New Address Line 3 (Ward/Commune)-In English Only"]
-                        })
-                        found = True
-                        break
-                if not found:
-                    unmatched_rows.append(form_row)
-            else:
-                # When not same billing, check Billing(03), Delivery(13), Pickups(02)
-                matched_flag = False
-                # Define the prefixes for the different address types
-                addr_map = {
-                    "03": "New Billing Address",
-                    "13": "New Delivery Address",
-                    "02": ["First New Pick Up Address", "Second New Pick Up Address", "Third New Pick Up Address"]
-                }
-
-                # Check Billing and Delivery
-                for addr_type in ["03", "13"]:
-                    prefix = addr_map[addr_type]
-                    new_addr1 = form_row.get(f"{prefix} Line 1 (Address No., Industrial Park Name, etc)-In English Only", "")
-                    new_addr2 = form_row.get(f"{prefix} Line 2 (Street Name)-In English Only", "")
-                    if not new_addr1.strip():
-                        continue
-                    new_addr1_norm = str(new_addr1).strip().lower().replace(" ", "")
-                    new_addr2_norm = str(new_addr2).strip().lower().replace(" ", "")
-
-                    ups_sub = ups_account_df[ups_account_df["Address Type"] == addr_type]
-                    found = False
-                    for _, ups_addr in ups_sub.iterrows():
-                        if (ups_addr["Address Line 1_norm"] == new_addr1_norm and
-                            ups_addr["Address Line 2_norm"] == new_addr2_norm):
-                            matched_rows.append({
-                                "Account Number": acc,
-                                "Address Type": addr_type,
-                                "New Address Line 1": new_addr1,
-                                "New Address Line 2": new_addr2,
-                                "New Address Line 3": form_row.get(f"{prefix} Line 3 (Ward/Commune)-In English Only", "")
-                            })
-                            found = True
-                            matched_flag = True
-                            break
-                    if not found:
-                        unmatched_rows.append(form_row)
-
-                # Check pickups (can be up to 3)
-                ups_pickups = ups_account_df[ups_account_df["Address Type"] == "02"]
-                pickup_prefixes = addr_map["02"]
-                pickups_found = 0
-
-                for prefix in pickup_prefixes:
-                    new_addr1 = form_row.get(f"{prefix} Line 1 (Address No., Industrial Park Name, etc)-In English Only", "")
-                    if not new_addr1.strip():
-                        continue
-                    new_addr2 = form_row.get(f"{prefix} Line 2 (Street Name)-In English Only", "")
-                    new_addr1_norm = str(new_addr1).strip().lower().replace(" ", "")
-                    new_addr2_norm = str(new_addr2).strip().lower().replace(" ", "")
-
-                    found = False
-                    for _, ups_addr in ups_pickups.iterrows():
-                        if (ups_addr["Address Line 1_norm"] == new_addr1_norm and
-                            ups_addr["Address Line 2_norm"] == new_addr2_norm):
-                            matched_rows.append({
-                                "Account Number": acc,
-                                "Address Type": "02",
-                                "New Address Line 1": new_addr1,
-                                "New Address Line 2": new_addr2,
-                                "New Address Line 3": form_row.get(f"{prefix} Line 3 (Ward/Commune)-In English Only", "")
-                            })
-                            found = True
-                            pickups_found += 1
-                            matched_flag = True
-                            break
-                    if not found:
-                        unmatched_rows.append(form_row)
-
-                # Verify number of pickup addresses match between Forms and UPS
-                if pickups_found != len(ups_pickups):
-                    unmatched_rows.append(form_row)
-
-        # Prepare DataFrames to return
-        matched_df = pd.DataFrame(matched_rows)
-        unmatched_df = pd.DataFrame(unmatched_rows)
-
-        # Prepare upload template DataFrame (expanding billing)
-        upload_template_df = prepare_upload_template(matched_df)
-
-        st.success(f"Processed: {len(matched_df)} matched rows, {len(unmatched_df)} unmatched rows.")
-
-        st.download_button("Download Matched CSV", data=matched_df.to_csv(index=False), file_name="matched.csv", mime="text/csv")
-        st.download_button("Download Unmatched CSV", data=unmatched_df.to_csv(index=False), file_name="unmatched.csv", mime="text/csv")
-        st.download_button("Download Upload Template CSV", data=upload_template_df.to_csv(index=False), file_name="upload_template.csv", mime="text/csv")
+        except Exception as e:
+            st.error(f"❌ An error occurred: {e}")
 
 if __name__ == "__main__":
     main()
