@@ -1,4 +1,4 @@
-pin
+pip
 install
 streamlit
 pandas
