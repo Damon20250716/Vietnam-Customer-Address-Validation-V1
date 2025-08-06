@@ -1,4 +1,6 @@
+pin
+install
 streamlit
 pandas
 openpyxl
-rapidfuzz
+xlsxwriter
