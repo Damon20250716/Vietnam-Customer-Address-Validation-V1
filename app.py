@@ -520,7 +520,6 @@ def main():
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                 key="matched_download",
                                 help="Download all matched records in Excel format",
-                                class_name="download-button"
                             )
                         else:
                             st.warning("No matched records found")
@@ -535,7 +534,6 @@ def main():
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                 key="unmatched_download",
                                 help="Download all unmatched records in Excel format",
-                                class_name="download-button"
                             )
                         else:
                             st.info("All records matched successfully!")
@@ -550,7 +548,6 @@ def main():
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             help="This file contains the formatted data ready for UPS system upload",
                             key="template_download",
-                            class_name="download-button"
                         )
                     
                     progress_bar.progress(100)
