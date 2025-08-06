@@ -1,110 +1,120 @@
 import streamlit as st
 import pandas as pd
 import unicodedata
-from io import BytesIO
 from rapidfuzz import fuzz
+from io import BytesIO
 
-# Remove Vietnamese tones
+st.set_page_config(page_title="Vietnam Address Validation Tool", layout="wide")
+
+# Function to remove Vietnamese tones
 def remove_tones(text):
     if not isinstance(text, str):
         return text
-    text = unicodedata.normalize('NFD', text)
-    text = ''.join(ch for ch in text if unicodedata.category(ch) != 'Mn')
+    text = unicodedata.normalize("NFD", text)
+    text = "".join([c for c in text if unicodedata.category(c) != "Mn"])
     return text
 
-# Normalize string columns (lowercase, strip spaces, remove tones)
-def normalize_col(col):
-    return col.astype(str).str.lower().str.strip().apply(remove_tones)
+# Normalize and remove tones
+def normalize(text):
+    if pd.isna(text):
+        return ""
+    return remove_tones(str(text)).strip().lower()
 
-# Improved matching function – slightly loosened
-def is_address_match(form_line1, form_line2, sys_line1, sys_line2):
-    if not isinstance(form_line1, str) or not isinstance(sys_line1, str):
-        return False
-    if not isinstance(form_line2, str):
-        form_line2 = ''
-    if not isinstance(sys_line2, str):
-        sys_line2 = ''
+# Combine address line 1 and line 2 for matching
+def combine_address_lines(row, line1_col, line2_col):
+    line1 = str(row.get(line1_col, "")).strip()
+    line2 = str(row.get(line2_col, "")).strip()
+    return f"{line1}, {line2}" if line2 else line1
 
-    # Combine address lines for better context
-    form_full = f"{form_line1} {form_line2}".lower().strip()
-    sys_full = f"{sys_line1} {sys_line2}".lower().strip()
-
-    form_full = remove_tones(form_full)
-    sys_full = remove_tones(sys_full)
-
-    # Loose partial match threshold
-    score = fuzz.partial_ratio(form_full, sys_full)
-
-    return score >= 75  # lowered from 85–90 to 75 for looser match
-
-# File upload
+# Upload files
 st.title("Vietnam Customer Address Validation Tool")
-forms_file = st.file_uploader("Upload Microsoft Forms Response Excel", type=["xlsx"])
-system_file = st.file_uploader("Upload UPS System Data Excel", type=["xlsx"])
+forms_file = st.file_uploader("Upload Microsoft Forms Response", type=["xlsx"])
+system_file = st.file_uploader("Upload UPS System Data", type=["xlsx"])
 
 if forms_file and system_file:
+    # Read files
     forms_df = pd.read_excel(forms_file)
     system_df = pd.read_excel(system_file)
 
-    # Normalize system data
-    system_df['AC_NUM'] = normalize_col(system_df['AC_NUM'])
-    system_df['Address_Line1'] = normalize_col(system_df['Address_Line1'])
-    system_df['Address_Line2'] = normalize_col(system_df['Address_Line2'])
+    # Drop empty rows
+    forms_df.dropna(subset=["Account Number"], inplace=True)
+    system_df.dropna(subset=["AC_NUM", "Address_Line1"], inplace=True)
 
+    # Normalize system address for matching
+    system_df["Norm_AC_NUM"] = system_df["AC_NUM"].apply(str).str.strip().str.upper()
+    system_df["Normalized_Line1"] = system_df["Address_Line1"].apply(normalize)
+
+    # Output DataFrames
     matched_rows = []
     unmatched_rows = []
 
-    for idx, row in forms_df.iterrows():
-        acct = str(row['Account Number']).strip().lower()
-        same_billing = str(row['Is Your New Billing Address the Same as Your Pickup and Delivery Address?']).strip().lower()
+    for _, form_row in forms_df.iterrows():
+        acct = str(form_row["Account Number"]).strip().upper()
 
-        sys_acct_df = system_df[system_df['AC_NUM'] == acct]
+        form_line1 = normalize(form_row.get("New Address Line 1 (Address No., Industrial Park Name, etc)-In English Only", ""))
+        form_line2 = normalize(form_row.get("New Address Line 2 (Street Name)-In English Only", ""))
 
-        def match_and_store(address_type_code, line1_col, line2_col):
-            new_line1 = str(row.get(line1_col, '')).strip()
-            new_line2 = str(row.get(line2_col, '')).strip()
-            found = False
-            for _, sys_row in sys_acct_df.iterrows():
-                if is_address_match(new_line1, new_line2, sys_row['Address_Line1'], sys_row['Address_Line2']):
-                    matched_rows.append({
-                        "AC_NUM": acct.upper(),
-                        "AC_Address_Type": address_type_code,
-                        "AC_Name": sys_row.get("AC_Name", ""),
-                        "Address_Line1": new_line1,
-                        "Address_Line2": new_line2,
-                        "City": row.get("City / Province", ""),
-                        "Postal_Code": "",
-                        "Country_Code": "VN",
-                        "Attention_Name": row.get("Full Name of Contact-In English Only", ""),
-                        "Address_Line22": "",
-                        "Address_Country_Code": "VN"
-                    })
-                    found = True
-                    break
-            return found
+        full_form_address = f"{form_line1}, {form_line2}".strip(", ")
 
-        matched = False
-        if same_billing.lower() == 'yes':
-            matched = match_and_store("01", "New Address Line 1 (Address No., Industrial Park Name, etc)-In English Only", "New Address Line 2 (Street Name)-In English Only")
+        # Filter system addresses by account number
+        system_candidates = system_df[system_df["Norm_AC_NUM"] == acct]
+
+        best_score = 0
+        best_match = None
+
+        for _, sys_row in system_candidates.iterrows():
+            sys_address = sys_row["Normalized_Line1"]
+            score = fuzz.partial_ratio(full_form_address, sys_address)
+            if score > best_score:
+                best_score = score
+                best_match = sys_row
+
+        if best_score >= 85:  # Loosened threshold from 90 → 85
+            result = form_row.to_dict()
+            result["Match Score"] = best_score
+            result["Matched Address"] = best_match["Address_Line1"]
+            result["AC_NUM"] = best_match["AC_NUM"]
+            result["AC_Name"] = best_match["AC_Name"]
+            result["Address_Type"] = "01" if form_row.get("Is Your New Billing Address the Same as Your Pickup and Delivery Address?", "").strip().lower() == "yes" else ""
+            matched_rows.append(result)
         else:
-            pickup_matched = match_and_store("02", "New Pick Up Address Line 1 (Address No., etc)-In English Only", "New Pick Up Address Line 2 (Street Name)-In English Only")
-            billing_matched = match_and_store("03", "New Billing Address Line 1 (Address No., etc)-In English Only", "New Billing Address Line 2 (Street Name)-In English Only")
-            delivery_matched = match_and_store("13", "New Delivery Address Line 1 (Address No., etc)-In English Only", "New Delivery Address Line 2 (Street Name)-In English Only")
-            matched = pickup_matched or billing_matched or delivery_matched
+            result = form_row.to_dict()
+            result["Unmatched Reason"] = "No close address match found in UPS system."
+            unmatched_rows.append(result)
 
-        if not matched:
-            row['Unmatched Reason'] = "No close match in UPS system"
-            unmatched_rows.append(row)
-
+    # Convert matched to DataFrame
     matched_df = pd.DataFrame(matched_rows)
     unmatched_df = pd.DataFrame(unmatched_rows)
 
-    def to_excel_download(df, filename):
-        buffer = BytesIO()
-        df.to_excel(buffer, index=False)
-        buffer.seek(0)
-        st.download_button(label=f"Download {filename}", data=buffer, file_name=filename, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    # Show result counts
+    st.success(f"✅ Matching complete. {len(matched_df)} matched, {len(unmatched_df)} unmatched.")
 
-    st.success(f"✅ Process complete. Matched: {len(matched_df)} | Unmatched: {len(unmatched_df)}")
-    to_excel_download(matched_df, "matched_addresses.xlsx")
-    to_excel_download(unmatched_df, "unmatched_forms_responses.xlsx")
+    # Export buttons
+    def convert_df_to_excel(df):
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False)
+        return output.getvalue()
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.download_button("📥 Download Matched File", convert_df_to_excel(matched_df), file_name="matched.xlsx")
+    with col2:
+        st.download_button("📥 Download Unmatched File", convert_df_to_excel(unmatched_df), file_name="unmatched.xlsx")
+    with col3:
+        # Upload template generation
+        if not matched_df.empty:
+            upload_df = pd.DataFrame({
+                "AC_NUM": matched_df["AC_NUM"],
+                "AC_Address_Type": matched_df["Address_Type"],
+                "AC_Name": matched_df["AC_Name"],
+                "Address_Line1": matched_df["New Address Line 1 (Address No., Industrial Park Name, etc)-In English Only"],
+                "Address_Line2": matched_df["New Address Line 2 (Street Name)-In English Only"],
+                "City": matched_df["City / Province"],
+                "Postal_Code": "",
+                "Country_Code": "VN",
+                "Attention_Name": matched_df["Full Name of Contact-In English Only"],
+                "Address_Line22": matched_df["New Address Line 3 (Ward/Commune)-In English Only"],
+                "Address_Country_Code": "VN"
+            })
+            st.download_button("📥 Download Upload Template", convert_df_to_excel(upload_df), file_name="upload_template.xlsx")
