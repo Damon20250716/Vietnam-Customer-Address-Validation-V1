@@ -95,8 +95,19 @@ def validate_columns(df, required_columns):
     if missing:
         raise ValueError(f"Missing required columns: {', '.join(missing)}")
 
+# New: Normalize account numbers to handle floats (e.g., 12345.0 → "12345")
+def normalize_account(account):
+    account_str = str(account).lower().strip()
+    # Remove trailing .0 if it's an integer float
+    if account_str.endswith('.0'):
+        account_str = account_str[:-2]
+    return account_str
+
 def process_files(forms_df, ups_df):
     try:
+        # Fix 1: Standardize Address Type to 2-digit strings (e.g., 2 → "02")
+        ups_df['Address Type'] = ups_df['Address Type'].astype(str).str.strip().str.zfill(2)
+        
         # Validate required columns
         required_form_columns = ["Account Number", "Is Your New Billing Address the Same as Your Pickup and Delivery Address?"]
         required_ups_columns = ["Account Number", "Address Type", "Address Line 1"]
@@ -107,8 +118,9 @@ def process_files(forms_df, ups_df):
         unmatched_rows = []
         upload_template_rows = []
 
-        ups_df['Account Number_norm'] = ups_df['Account Number'].astype(str).str.lower().str.strip()
-        forms_df['Account Number_norm'] = forms_df['Account Number'].astype(str).str.lower().str.strip()
+        # Fix 2: Use improved account normalization
+        ups_df['Account Number_norm'] = ups_df['Account Number'].apply(normalize_account)
+        forms_df['Account Number_norm'] = forms_df['Account Number'].apply(normalize_account)
 
         ups_grouped = ups_df.groupby('Account Number_norm')
         if not ups_grouped.ngroups:
@@ -146,7 +158,7 @@ def process_files(forms_df, ups_df):
                     combined_form += f", {new_addr3}"
                 
                 for _, ups_row in ups_acc_df.iterrows():
-                    if ups_row["Address Type"] == '01':
+                    if ups_row["Address Type"] == '01':  # Now matches 2-digit string
                         ups_addr1 = get_address_line(ups_row, 1)
                         ups_addr2 = get_address_line(ups_row, 2)
                         combined_ups = f"{ups_addr1}"
@@ -238,7 +250,7 @@ def process_files(forms_df, ups_df):
 
                 def check_address_in_ups(combined_form_addr, addr_type_code):
                     for _, ups_row in ups_acc_df.iterrows():
-                        if ups_row["Address Type"] == addr_type_code:
+                        if ups_row["Address Type"] == addr_type_code:  # Now uses 2-digit string
                             ups_addr1 = get_address_line(ups_row, 1)
                             ups_addr2 = get_address_line(ups_row, 2)
                             combined_ups = f"{ups_addr1}"
@@ -264,7 +276,7 @@ def process_files(forms_df, ups_df):
                     pickup_matches = []
                     unmatched_pickup = False
                     for pu_addr in pickup_addrs:
-                        match = check_address_in_ups(pu_addr[4], "02")
+                        match = check_address_in_ups(pu_addr[4], "02")  # Now matches "02"
                         if match is None:
                             unmatched_dict = form_row.to_dict()
                             for col in form_row.index:
@@ -382,26 +394,34 @@ def process_files(forms_df, ups_df):
         raise e
 
 def to_excel(df):
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Results')
-        workbook = writer.book
-        worksheet = writer.sheets['Results']
-        header_format = workbook.add_format({
-            'bold': True,
-            'text_wrap': True,
-            'valign': 'top',
-            'fg_color': '#4472C4',
-            'font_color': 'white',
-            'border': 1
-        })
-        for col_num, value in enumerate(df.columns.values):
-            worksheet.write(0, col_num, value, header_format)
-        for column in df:
-            column_width = max(df[column].astype(str).map(len).max(), len(column)) + 2
-            col_idx = df.columns.get_loc(column)
-            worksheet.set_column(col_idx, col_idx, column_width)
-    return output.getvalue()
+    # Fix 3: Handle xlsxwriter dependency with error handling
+    try:
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            df.to_excel(writer, index=False, sheet_name='Results')
+            workbook = writer.book
+            worksheet = writer.sheets['Results']
+            header_format = workbook.add_format({
+                'bold': True,
+                'text_wrap': True,
+                'valign': 'top',
+                'fg_color': '#4472C4',
+                'font_color': 'white',
+                'border': 1
+            })
+            for col_num, value in enumerate(df.columns.values):
+                worksheet.write(0, col_num, value, header_format)
+            for column in df:
+                column_width = max(df[column].astype(str).map(len).max(), len(column)) + 2
+                col_idx = df.columns.get_loc(column)
+                worksheet.set_column(col_idx, col_idx, column_width)
+        return output.getvalue()
+    except ImportError:
+        st.warning("xlsxwriter not installed - using basic Excel format without styling")
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Results')
+        return output.getvalue()
 
 def main():
     st.set_page_config(
@@ -448,6 +468,8 @@ def main():
         
         st.markdown("---")
         st.markdown(f"**Last Updated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        # Fix 3: Add note about xlsxwriter
+        st.markdown("**Note:** Install xlsxwriter for formatted Excel outputs: `pip install xlsxwriter`")
 
     st.title("🇻🇳 Vietnam Address Validation Tool")
     st.markdown('<div class="header-text">Enhanced address matching with 60-70% similarity capture</div>', unsafe_allow_html=True)
