@@ -219,7 +219,16 @@ def process_files(forms_df, ups_df):
 
             # Process Pickup addresses (02 type)
             pickup_addrs = []
-            pickup_count = int(form_row.get("How Many Pick Up Address Do You Have?", 0))
+            # Fix: Handle text/number pickup counts
+            pickup_count_raw = form_row.get("How Many Pick Up Address Do You Have?", 0)
+            word_to_num = {"One": 1, "Two": 2, "Three": 3}  # Extend for more values if needed
+            if isinstance(pickup_count_raw, str):
+                pickup_count = word_to_num.get(pickup_count_raw.strip(), 0)
+            else:
+                try:
+                    pickup_count = int(pickup_count_raw)
+                except ValueError:
+                    pickup_count = 0
             pickup_count = min(pickup_count, 3)  # Max 3 pickups
 
             for i in range(1, pickup_count + 1):
