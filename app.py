@@ -26,7 +26,7 @@ def clean_address(addr):
     addr = re.sub(r'\s+', ' ', addr).strip()  # Normalize spaces
     return addr
 
-# Address matching with 60-70% similarity
+# Address matching with ≥60% similarity
 def address_match(addr1, addr2):
     a1 = clean_address(addr1)
     a2 = clean_address(addr2)
@@ -34,20 +34,20 @@ def address_match(addr1, addr2):
     if not a1 or not a2:
         return False
     
-    # Check exact match first
+    # Exact match
     if a1 == a2:
         return True
     
-    # Check substring match
+    # Substring match
     if a1 in a2 or a2 in a1:
         return True
     
-    # Check similarity ratio (60-70% threshold)
+    # Similarity ratio (≥60%)
     ratio = difflib.SequenceMatcher(None, a1, a2).ratio()
-    if 0.6 <= ratio < 0.7:
+    if ratio >= 0.6:
         return True
     
-    # Check component-wise match
+    # Component-wise match (≥60% per component)
     a1_parts = [p.strip() for p in a1.split(',') if p.strip()]
     a2_parts = [p.strip() for p in a2.split(',') if p.strip()]
     
@@ -58,7 +58,7 @@ def address_match(addr1, addr2):
                 if difflib.SequenceMatcher(None, p1, p2).ratio() >= 0.6:
                     match_count += 1
                     break
-        if match_count / len(a1_parts) >= 0.7:
+        if match_count / len(a1_parts) >= 0.6:
             return True
             
     return False
@@ -142,40 +142,54 @@ def process_files(forms_df, ups_df):
         matched = False
         ups_01 = ups_account_data[ups_account_data['Address Type'] == '01']
 
-        # Case 1: Customer answered "Yes" to same billing address
+        # Case 1: Customer answered "Yes" (single address for all types)
         if is_same == 'yes':
-            # Get form address
+            # Combine Form address lines 1-3
             form_addr1 = str(form_row.get("New Address Line 1 (Address No., Industrial Park Name, etc)-In English Only", "")).strip()
             form_addr2 = str(form_row.get("New Address Line 2 (Street Name)-In English Only", "")).strip()
             form_addr3 = str(form_row.get("New Address Line 3 (Ward/Commune)-In English Only", "")).strip()
             form_full = f"{form_addr1}, {form_addr2}, {form_addr3}"
             form_clean = clean_address(form_full)
 
-            # Check against UPS 01 type addresses
+            # Match against UPS 01 (All-in-one address type)
             if not ups_01.empty:
                 for _, ups_row in ups_01.iterrows():
-                    if address_match(form_clean, ups_row['Full_Address_clean']):
+                    if address_match(form_full, ups_row['Full_Address']):  # Compare raw full address
                         # Matched - add to matched records
                         match_data = form_data.copy()
                         match_data['UPS Matched Address'] = ups_row['Full_Address']
-                        match_data['Matching Type'] = '01 (All)'
+                        match_data['Matching Type'] = '01 (All-in-one)'
                         matched_rows.append(match_data)
                         matched = True
 
-                        # Add to upload template (01 type)
+                        # Build upload template (matches your Excel structure)
                         contact = get_contact_name(form_row)
-                        city = remove_tones(str(form_row.get("City / Province", "")))
                         
-                        # Billing address with codes 1, 2, 6
+                        # 1. Address Type 01 (All-in-one) - Invoice Option BLANK
+                        upload_template.append({
+                            "AC_NUM": form_row['Account Number'],
+                            "AC_Address_Type": "01",
+                            "invoice option": "",  # Blank as per template
+                            "AC_name": remove_tones(str(ups_row.get("AC_Name", ""))),
+                            "Address_Line1": remove_tones(form_addr1),
+                            "Address_Line2": remove_tones(form_addr2),
+                            "Postal_Code": str(ups_row.get("Postal_Code", "")),
+                            "Country_Code": str(ups_row.get("Country_Code", "")),
+                            "Attention_Name": contact,
+                            "Address_Line22": remove_tones(form_addr3),  # Address Line 3
+                            "Address_Country_Code": str(ups_row.get("Address_Country_Code", "")),
+                            "Matching_Score": "High"
+                        })
+
+                        # 2. Address Type 03 (Billing) - Invoice Options 1, 2, 6 (3 rows)
                         for code in ['1', '2', '6']:
                             upload_template.append({
                                 "AC_NUM": form_row['Account Number'],
-                                "AC_Address_Type": "01",
+                                "AC_Address_Type": "03",
                                 "invoice option": code,
-                                "AC_Name": remove_tones(str(ups_row.get("AC_Name", ""))),
+                                "AC_name": remove_tones(str(ups_row.get("AC_Name", ""))),
                                 "Address_Line1": remove_tones(form_addr1),
                                 "Address_Line2": remove_tones(form_addr2),
-                                "City": city,
                                 "Postal_Code": str(ups_row.get("Postal_Code", "")),
                                 "Country_Code": str(ups_row.get("Country_Code", "")),
                                 "Attention_Name": contact,
@@ -185,9 +199,9 @@ def process_files(forms_df, ups_df):
                             })
                         break
 
-        # Case 2: Customer answered "No" to same billing address
+        # Case 2: Customer answered "No" (separate billing/delivery/pickup)
         else:
-            # Process Billing address (03 type)
+            # --- Billing Address (Type 03) ---
             billing_addr1 = str(form_row.get("New Billing Address Line 1", "")).strip()
             billing_addr2 = str(form_row.get("New Billing Address Line 2", "")).strip()
             billing_addr3 = str(form_row.get("New Billing Address Line 3", "")).strip()
@@ -197,12 +211,12 @@ def process_files(forms_df, ups_df):
 
             ups_03 = ups_account_data[ups_account_data['Address Type'] == '03']
             for _, ups_row in ups_03.iterrows():
-                if address_match(billing_clean, ups_row['Full_Address_clean']):
+                if address_match(billing_full, ups_row['Full_Address']):
                     billing_matched = True
                     billing_ups_row = ups_row
                     break
 
-            # Process Delivery address (13 type)
+            # --- Delivery Address (Type 13) ---
             delivery_addr1 = str(form_row.get("New Delivery Address Line 1", "")).strip()
             delivery_addr2 = str(form_row.get("New Delivery Address Line 2", "")).strip()
             delivery_addr3 = str(form_row.get("New Delivery Address Line 3", "")).strip()
@@ -212,14 +226,13 @@ def process_files(forms_df, ups_df):
 
             ups_13 = ups_account_data[ups_account_data['Address Type'] == '13']
             for _, ups_row in ups_13.iterrows():
-                if address_match(delivery_clean, ups_row['Full_Address_clean']):
+                if address_match(delivery_full, ups_row['Full_Address']):
                     delivery_matched = True
                     delivery_ups_row = ups_row
                     break
 
-            # Process Pickup addresses (02 type)
+            # --- Pickup Addresses (Type 02, max 3) ---
             pickup_addrs = []
-            # Fix: Handle text/number pickup counts
             pickup_count_raw = form_row.get("How Many Pick Up Address Do You Have?", 0)
             word_to_num = {"One": 1, "Two": 2, "Three": 3}  # Extend for more values if needed
             if isinstance(pickup_count_raw, str):
@@ -256,7 +269,7 @@ def process_files(forms_df, ups_df):
                 addr_clean = clean_address(addr_full)
                 found = False
                 for _, ups_row in ups_02.iterrows():
-                    if address_match(addr_clean, ups_row['Full_Address_clean']):
+                    if address_match(addr_full, ups_row['Full_Address']):
                         pickup_ups_rows.append(ups_row)
                         found = True
                         break
@@ -264,7 +277,7 @@ def process_files(forms_df, ups_df):
                     pickup_matched = False
                     break
 
-            # Check if all address types matched
+            # If all addresses match, build upload template
             if billing_matched and delivery_matched and pickup_matched:
                 match_data = form_data.copy()
                 match_data['UPS Matched Billing Address'] = billing_ups_row['Full_Address']
@@ -274,21 +287,18 @@ def process_files(forms_df, ups_df):
                 matched_rows.append(match_data)
                 matched = True
 
-                # Add to upload template
+                # Build upload template rows
                 contact = get_contact_name(form_row)
-                billing_city = remove_tones(str(form_row.get("New Billing City / Province", "")))
-                delivery_city = remove_tones(str(form_row.get("New Delivery City / Province", "")))
-
-                # Billing address (03 type) with codes 1,2,6
+                
+                # 1. Billing Address (Type 03) - Invoice Options 1, 2, 6 (3 rows)
                 for code in ['1', '2', '6']:
                     upload_template.append({
                         "AC_NUM": form_row['Account Number'],
                         "AC_Address_Type": "03",
                         "invoice option": code,
-                        "AC_Name": remove_tones(str(billing_ups_row.get("AC_Name", ""))),
+                        "AC_name": remove_tones(str(billing_ups_row.get("AC_Name", ""))),
                         "Address_Line1": remove_tones(billing_addr1),
                         "Address_Line2": remove_tones(billing_addr2),
-                        "City": billing_city,
                         "Postal_Code": str(billing_ups_row.get("Postal_Code", "")),
                         "Country_Code": str(billing_ups_row.get("Country_Code", "")),
                         "Attention_Name": contact,
@@ -297,15 +307,14 @@ def process_files(forms_df, ups_df):
                         "Matching_Score": "High"
                     })
 
-                # Delivery address (13 type)
+                # 2. Delivery Address (Type 13) - Invoice Option BLANK
                 upload_template.append({
                     "AC_NUM": form_row['Account Number'],
                     "AC_Address_Type": "13",
                     "invoice option": "",
-                    "AC_Name": remove_tones(str(delivery_ups_row.get("AC_Name", ""))),
+                    "AC_name": remove_tones(str(delivery_ups_row.get("AC_Name", ""))),
                     "Address_Line1": remove_tones(delivery_addr1),
                     "Address_Line2": remove_tones(delivery_addr2),
-                    "City": delivery_city,
                     "Postal_Code": str(delivery_ups_row.get("Postal_Code", "")),
                     "Country_Code": str(delivery_ups_row.get("Country_Code", "")),
                     "Attention_Name": contact,
@@ -314,21 +323,20 @@ def process_files(forms_df, ups_df):
                     "Matching_Score": "High"
                 })
 
-                # Pickup addresses (02 type)
+                # 3. Pickup Addresses (Type 02) - Each pickup as a separate row (Invoice Option BLANK)
                 for i, (addr, ups_row) in enumerate(zip(pickup_addrs, pickup_ups_rows), 1):
                     pu_city = remove_tones(str(form_row.get(f"{['First', 'Second', 'Third'][i-1]} New Pick Up Address City / Province", "")))
                     upload_template.append({
                         "AC_NUM": form_row['Account Number'],
                         "AC_Address_Type": "02",
                         "invoice option": "",
-                        "AC_Name": remove_tones(str(ups_row.get("AC_Name", ""))),
+                        "AC_name": remove_tones(str(ups_row.get("AC_Name", ""))),
                         "Address_Line1": remove_tones(addr[0]),
                         "Address_Line2": remove_tones(addr[1]),
-                        "City": pu_city,
                         "Postal_Code": str(ups_row.get("Postal_Code", "")),
                         "Country_Code": str(ups_row.get("Country_Code", "")),
                         "Attention_Name": contact,
-                        "Address_Line22": remove_tones(addr[2]),
+                        "Address_Line22": remove_tones(addr[2]),  # Address Line 3
                         "Address_Country_Code": str(ups_row.get("Address_Country_Code", "")),
                         "Matching_Score": "High"
                     })
@@ -358,15 +366,14 @@ def process_files(forms_df, ups_df):
     unmatched_df = pd.DataFrame(unmatched_rows)
     upload_df = pd.DataFrame(upload_template)
 
-    # Ensure proper column order for upload template
-    if not upload_df.empty:
-        upload_columns = [
-            "AC_NUM", "AC_Address_Type", "invoice option", "AC_Name", 
-            "Address_Line1", "Address_Line2", "City", "Postal_Code",
-            "Country_Code", "Attention_Name", "Address_Line22", 
-            "Address_Country_Code", "Matching_Score"
-        ]
-        upload_df = upload_df.reindex(columns=upload_columns)
+    # Ensure column order matches your Excel template
+    upload_columns = [
+        "AC_NUM", "AC_Address_Type", "invoice option", "AC_name", 
+        "Address_Line1", "Address_Line2", "Postal_Code", "Country_Code",
+        "Attention_Name", "Address_Line22", "Address_Country_Code", 
+        "Matching_Score"
+    ]
+    upload_df = upload_df.reindex(columns=upload_columns)
 
     return matched_df, unmatched_df, upload_df
 
